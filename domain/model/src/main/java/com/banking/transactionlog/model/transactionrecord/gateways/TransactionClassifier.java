@@ -2,7 +2,8 @@ package com.banking.transactionlog.model.transactionrecord.gateways;
 
 import com.banking.transactionlog.model.transactionrecord.TransactionRecord;
 
-public interface TransactionRecordRepository {
-    Boolean isDebit();
-    Boolean isCredit();
+import java.math.BigDecimal;
+
+public interface TransactionClassifier {
+    BigDecimal signedAmount(TransactionRecord record);
 }
