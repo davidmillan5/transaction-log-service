@@ -77,7 +77,7 @@ flowchart LR
 
 | Entity | Attributes | Notes |
 |---|---|---|
-| `TransactionRecord` | `id: TransactionId`, `accountId: AccountReference`, `partyId: UUID`, `type: TransactionType` (enum: `DEBIT`, `CREDIT`), `amount: Money`, `balanceAfter: Money`, `description: String`, `channel: String`, `valueDate: LocalDate`, `postedAt: Instant`, `externalReference: String` | Aggregate root. Immutable once created — this is a ledger line, never updated in place. |
+| `TransactionRecordUseCase` | `id: TransactionId`, `accountId: AccountReference`, `partyId: UUID`, `type: TransactionType` (enum: `DEBIT`, `CREDIT`), `amount: Money`, `balanceAfter: Money`, `description: String`, `channel: String`, `valueDate: LocalDate`, `postedAt: Instant`, `externalReference: String` | Aggregate root. Immutable once created — this is a ledger line, never updated in place. |
 
 **Value objects.**
 
@@ -101,7 +101,7 @@ flowchart LR
 | `DuplicateTransactionException` | `externalReference` already exists |
 | `InvalidTransactionFilterException` | Filter invariants violated (date range or amount range inverted) |
 
-**Domain model vs. persistence model vs. API DTO.** The domain `TransactionRecord` has no notion of a database row; `TransactionJpaEntity` (infrastructure) adds `@Id`, `@Column`, `@Version`-style concerns and a denormalized `currencyCode` string column. The API DTO (`TransactionResponse`) additionally formats `amount` as a string to avoid JSON floating-point ambiguity and omits internal fields such as `externalReference` from read responses (it is write-only, used for idempotency on ingestion).
+**Domain model vs. persistence model vs. API DTO.** The domain `TransactionRecordUseCase` has no notion of a database row; `TransactionJpaEntity` (infrastructure) adds `@Id`, `@Column`, `@Version`-style concerns and a denormalized `currencyCode` string column. The API DTO (`TransactionResponse`) additionally formats `amount` as a string to avoid JSON floating-point ambiguity and omits internal fields such as `externalReference` from read responses (it is write-only, used for idempotency on ingestion).
 
 ## 5. Detailed Class and Package Specification
 
@@ -859,7 +859,7 @@ transaction-log-service/
 
 **Spring.** What does `@RestControllerAdvice` do that `@ExceptionHandler` on the controller itself doesn't? Why constructor injection over field injection? Walk through what `spring-boot-starter-oauth2-resource-server` autoconfigures.
 
-**Clean Architecture.** Where does `TransactionRepository` (the interface) live, and where does its implementation live — and why does that direction matter? What would break if `TransactionRecord` imported `jakarta.persistence.Entity`?
+**Clean Architecture.** Where does `TransactionRepository` (the interface) live, and where does its implementation live — and why does that direction matter? What would break if `TransactionRecordUseCase` imported `jakarta.persistence.Entity`?
 
 **BIAN.** Why is this project scoped to only a slice of the Current Account Service Domain rather than the whole thing? What's the difference between a BIAN Service Domain and a microservice?
 
