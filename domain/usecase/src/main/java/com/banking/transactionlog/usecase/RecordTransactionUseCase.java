@@ -1,6 +1,7 @@
-package com.banking.transactionlog.usecase.port.in;
+package com.banking.transactionlog.usecase;
 
 import com.banking.transactionlog.model.exception.DuplicateTransactionException;
+import com.banking.transactionlog.model.exception.messages.DuplicateTransactionExceptionMessage;
 import com.banking.transactionlog.model.transactionrecord.TransactionRecord;
 import com.banking.transactionlog.model.transactionrecord.gateways.RecordTransactionInputPort;
 import com.banking.transactionlog.model.transactionrecord.gateways.TransactionRepository;
@@ -18,12 +19,10 @@ public class RecordTransactionUseCase implements RecordTransactionInputPort {
 
     @Override
     public TransactionRecord record(TransactionRecord transaction) {
-        if(transactionRepository.existsByExternalReference("exists").equals(transaction)){
-            return new DuplicateTransactionException();
-        }else{
-            return recordTransactionInputPort.record(transaction);
+        if (transactionRepository.existsByExternalReference(transaction.getExternalReference())) {
+            throw new DuplicateTransactionException(
+                    DuplicateTransactionExceptionMessage.DUPLICATE_TRANSACTION_EXCEPTION_MESSAGE);
         }
-
-
+        return transactionRepository.save(transaction);
     }
 }

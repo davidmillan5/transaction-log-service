@@ -1,4 +1,4 @@
-package com.banking.transactionlog.usecase.port.in;
+package com.banking.transactionlog.usecase;
 
 import com.banking.transactionlog.model.AccountReference;
 import com.banking.transactionlog.model.Page;

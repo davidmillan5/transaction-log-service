@@ -26,6 +26,8 @@ public class DuplicateTransactionException extends RuntimeException {
         this.code = code;
     }
 
-
+    public DuplicateTransactionException(DuplicateTransactionExceptionMessage message) {
+        this(message, message.getStatus(), message.getCode());
+    }
 
 }

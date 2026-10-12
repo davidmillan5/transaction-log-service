@@ -29,8 +29,15 @@ public class TransactionNotFoundException extends RuntimeException {
     }
 
 
-    public TransactionNotFoundException(TransactionId id) {
-        super("Transaction not found: " + id);
+
+    public TransactionNotFoundException(TransactionId id, TransactionNotFoundExceptionMessage transactionNotFoundExceptionMessage, Integer status, String code) {
+        this.transactionNotFoundExceptionMessage = transactionNotFoundExceptionMessage;
+        this.status = status;
+        this.code = code;
+    }
+
+    public TransactionNotFoundException(TransactionNotFoundExceptionMessage message) {
+        this(message, message.getStatus(), message.getCode());
     }
 
 }

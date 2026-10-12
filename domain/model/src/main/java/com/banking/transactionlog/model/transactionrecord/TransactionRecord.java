@@ -5,12 +5,16 @@ import com.banking.transactionlog.model.AccountReference;
 import com.banking.transactionlog.model.Money;
 import com.banking.transactionlog.model.TransactionId;
 import com.banking.transactionlog.model.TransactionType;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.UUID;
 
 
+@Getter
+@Setter
 public class TransactionRecord {
 
     private TransactionId id;
