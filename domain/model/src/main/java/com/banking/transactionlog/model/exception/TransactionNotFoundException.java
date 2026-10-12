@@ -1,6 +1,7 @@
 package com.banking.transactionlog.model.exception;
 
 
+import com.banking.transactionlog.model.TransactionId;
 import com.banking.transactionlog.model.exception.messages.TransactionNotFoundExceptionMessage;
 import lombok.Getter;
 
@@ -27,6 +28,10 @@ public class TransactionNotFoundException extends RuntimeException {
         this.code = code;
     }
 
+
+    public TransactionNotFoundException(TransactionId id) {
+        super("Transaction not found: " + id);
+    }
 
 }
 
