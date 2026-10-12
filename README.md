@@ -51,11 +51,15 @@
 | Architectural concepts | Ports & adapters, dependency inversion, aggregate boundary discipline, idempotent ingestion |
 | Java concepts | Records for value objects, `Optional`, `BigDecimal` for money, custom unchecked exceptions, Bean Validation |
 | Spring concepts | Constructor injection, `@ControllerAdvice`, `@Valid`, Spring Data JPA repositories, `spring-boot-starter-oauth2-resource-server` |
-| Clean Architecture concepts | Why `domain/` cannot import `org.springframework.*`, why the repository **interface** lives in domain and the **implementation** lives in infrastructure |
+| Clean Architecture concepts | Why `domain` (the `model` and `usecase` Gradle subprojects) cannot depend on `org.springframework.*` at all — enforced structurally by `validateStructure`, not just by convention; why the **Gateway** interface lives inside `model`, next to the entity it serves, while its **implementation** lives in `infrastructure/driven-adapters` |
 | Banking concepts | Current Account transaction posting semantics, debit/credit sign conventions, value date vs. posting date |
-| Why this project exists in the progression | It is the only project in the portfolio with no reactive concerns at all — every architectural decision can be reasoned about without also reasoning about threading. Get the ports/adapters discipline right here, because every later project assumes it. |
+| Why this project exists in the progression | It is the only project in the portfolio with no reactive concerns at all — every architectural decision can be reasoned about without also reasoning about threading. Get the model/gateway/use-case discipline right here, in Bancolombia's own terms, because every later project assumes it. |
 
-**What I should understand before starting Project 2:** how to define an output port as a domain-owned interface and implement it in infrastructure without leaking JPA annotations into the domain; how the JWT resource server filter chain authorizes by scope; how the API envelope and global exception handler work end to end.
+> **Bancolombia scaffold terminology note.** The interface a use case depends on to reach infrastructure — `TransactionRecordRepository` below — is called a **Gateway** in Bancolombia's own Clean Architecture scaffold: the Gradle plugin's `gm` (generate model) task creates it directly inside the `model` Gradle subproject, in a `gateways` sub-package, next to the entity it serves. It is never called a "service" in this convention, and it does not live alongside the use cases either — a detail that differs from some generic hexagonal-architecture write-ups that colocate ports with their use cases. "Service" is a genuinely overloaded word in this space: Robert C. Martin's original Clean Architecture material (which Bancolombia's own naming descends from) uses "Gateway" for exactly this role; Hexagonal Architecture calls the same concept a "Port"; a plain Spring `@Service` class is closer to what Clean Architecture calls a **Use Case**; and a **Domain Service** (`TransactionClassifier`, §4) is a fourth, unrelated concept — stateless business logic that doesn't naturally belong to one entity. All four show up in this one project on purpose, so the distinction is concrete rather than abstract.
+>
+> **What the scaffold does and doesn't generate for you.** `gm` generates the entity *and* its gateway interface together. `guc` (generate use case) generates a single concrete `UseCase` class with no interface in front of it — there is no separate "input port" layer by default. This spec previously modeled `RecordTransactionInputPort`/`FindAccountTransactionsInputPort`/`FindTransactionByIdInputPort` as interfaces; that's a legitimate hexagonal-architecture technique some teams add on top, but it is not what the Bancolombia scaffold itself produces, so it's removed below in favor of controllers depending on the concrete `UseCase` classes directly, matching what `./gradlew guc` actually generates.
+
+**What I should understand before starting Project 2:** how to define a Gateway as a domain-owned interface inside `model` and implement it in `infrastructure/driven-adapters` without leaking JPA annotations into the domain; how the JWT resource server filter chain authorizes by scope; how the API envelope and global exception handler work end to end.
 
 **Component / architecture diagram.**
 
@@ -63,12 +67,11 @@
 flowchart LR
     Channel["Channel App\n(JWT Bearer)"] --> Ctrl[TransactionController]
     Core["Core Banking\nPosting Engine\n(Client Credentials)"] --> Ctrl
-    Ctrl --> InPorts["Input Ports\n(domain.usecase.port.in)"]
-    InPorts --> UC["Use Cases\n(RecordTransactionUseCase,\nFindAccountTransactionsUseCase,\nFindTransactionByIdUseCase)"]
-    UC --> OutPort["TransactionRepository\n(output port)"]
-    OutPort --> Adapter[TransactionRepositoryAdapter]
+    Ctrl --> UC["Use Cases\n(RecordTransactionUseCase,\nFindAccountTransactionsUseCase,\nFindTransactionByIdUseCase)"]
+    UC --> GW["TransactionRecordRepository\n(Gateway — model.transactionrecord.gateways)"]
+    GW --> Adapter[TransactionRecordRepositoryAdapter]
     Adapter --> DB[(PostgreSQL\ntransaction_log)]
-    UC --> Classifier[TransactionClassifier]
+    UC --> Classifier["TransactionClassifier\n(Domain Service — model.transactionrecord)"]
 ```
 
 ## 4. Detailed Domain Model
@@ -77,12 +80,13 @@ flowchart LR
 
 | Entity | Attributes | Notes |
 |---|---|---|
-| `TransactionRecordUseCase` | `id: TransactionId`, `accountId: AccountReference`, `partyId: UUID`, `type: TransactionType` (enum: `DEBIT`, `CREDIT`), `amount: Money`, `balanceAfter: Money`, `description: String`, `channel: String`, `valueDate: LocalDate`, `postedAt: Instant`, `externalReference: String` | Aggregate root. Immutable once created — this is a ledger line, never updated in place. |
+| `TransactionRecord` | `id: TransactionId`, `accountId: AccountReference`, `partyId: UUID`, `type: TransactionType` (enum: `DEBIT`, `CREDIT`), `amount: Money`, `balanceAfter: Money`, `description: String`, `channel: String`, `valueDate: LocalDate`, `postedAt: Instant`, `externalReference: String` | Aggregate root. Immutable once created — this is a ledger line, never updated in place. |
 
 **Value objects.**
 
 | Value object | Attributes | Invariants |
 |---|---|---|
+| `TransactionId` | `value: UUID` | A typed identifier wrapper, not a bare `UUID` — the same discipline every later project in this portfolio applies to its own aggregate ID (`EntitlementId`, `ChallengeId`, `FraudCaseId`, and so on), so the type system catches a misplaced ID at compile time instead of at a runtime NPE or a silent wrong-row bug |
 | `Money` | `amount: BigDecimal`, `currency: Currency` | `amount` scale must equal the currency's minor unit; never negative in isolation (sign is carried by `TransactionType`, not by `Money`) |
 | `AccountReference` | `accountId: UUID`, `productType: String` | `accountId` non-null |
 | `TransactionFilter` | `dateFrom: Optional<LocalDate>`, `dateTo: Optional<LocalDate>`, `type: Optional<TransactionType>`, `minAmount: Optional<BigDecimal>`, `maxAmount: Optional<BigDecimal>` | if both dates present, `dateFrom <= dateTo`; if both amounts present, `minAmount <= maxAmount` |
@@ -101,25 +105,24 @@ flowchart LR
 | `DuplicateTransactionException` | `externalReference` already exists |
 | `InvalidTransactionFilterException` | Filter invariants violated (date range or amount range inverted) |
 
-**Domain model vs. persistence model vs. API DTO.** The domain `TransactionRecordUseCase` has no notion of a database row; `TransactionJpaEntity` (infrastructure) adds `@Id`, `@Column`, `@Version`-style concerns and a denormalized `currencyCode` string column. The API DTO (`TransactionResponse`) additionally formats `amount` as a string to avoid JSON floating-point ambiguity and omits internal fields such as `externalReference` from read responses (it is write-only, used for idempotency on ingestion).
+**Domain model vs. persistence model vs. API DTO.** The domain `TransactionRecord` has no notion of a database row; `TransactionJpaEntity` (infrastructure) adds `@Id`, `@Column`, `@Version`-style concerns and a denormalized `currencyCode` string column. The API DTO (`TransactionResponse`) additionally formats `amount` as a string to avoid JSON floating-point ambiguity and omits internal fields such as `externalReference` from read responses (it is write-only, used for idempotency on ingestion).
 
 ## 5. Detailed Class and Package Specification
 
-**Package root:** `com.banking.transactionlog`
+**Package root:** `com.banking.transactionlog` — note that, matching the scaffold's own generated output, `domain` is the name of the Gradle **module grouping** (`domain/model`, `domain/usecase` as directories) but is **not** itself a Java package segment: the actual packages are `com.banking.transactionlog.model...` and `com.banking.transactionlog.usecase...`, not `...domain.model...`. (Confidence on this specific point: 0.85 — it's consistent across every scaffold example I could verify, but if your local `./gradlew ca` output differs, trust the generator over this spec.)
 
 **Class count summary.**
 
 ```text
-Domain layer
+Domain layer (Gradle modules: model, usecase)
 - 1 entity (TransactionRecord)
-- 3 value objects (Money, AccountReference, TransactionFilter)
+- 4 value objects (TransactionId, Money, AccountReference, TransactionFilter)
 - 1 domain service (TransactionClassifier)
 - 3 domain exceptions
+- 1 gateway (TransactionRecordRepository)
 
-Application layer
-- 3 use cases
-- 3 input ports
-- 1 output port
+Application layer (use cases, inside the usecase module, one sub-package each)
+- 3 use cases (no separate input-port interfaces — see the scaffold terminology note in §3)
 - 3 DTOs
 - 2 mappers
 
@@ -131,11 +134,22 @@ Infrastructure layer
 - 1 OpenAPI config
 ```
 
-### Domain layer — `domain/model`
+### Domain layer — Gradle module `domain/model`, package `com.banking.transactionlog.model.transactionrecord`
+
+```text
+Record: TransactionId
+Package: com.banking.transactionlog.model.transactionrecord
+Layer: Domain / Value Object (typed identifier)
+Responsibility: Wraps the raw UUID identifying one TransactionRecord, so it can never be passed
+                where a different entity's ID (e.g. partyId) is expected.
+Attributes: value: UUID
+Methods:
++ generate(): TransactionId   [static factory — new TransactionId(UUID.randomUUID())]
+```
 
 ```text
 Class: TransactionRecord
-Package: com.banking.transactionlog.domain.model
+Package: com.banking.transactionlog.model.transactionrecord
 Layer: Domain / Entity (aggregate root)
 Responsibility: Represents one immutable posted transaction line.
 Attributes: id: TransactionId; accountId: AccountReference; partyId: UUID; type: TransactionType;
@@ -151,7 +165,7 @@ Methods:
 
 ```text
 Class (record): Money
-Package: com.banking.transactionlog.domain.model
+Package: com.banking.transactionlog.model.transactionrecord
 Layer: Domain / Value Object
 Responsibility: Immutable monetary amount with currency-scale validation.
 Attributes: amount: BigDecimal; currency: Currency
@@ -161,14 +175,14 @@ Methods:
 
 ```text
 Class (record): AccountReference
-Package: com.banking.transactionlog.domain.model
+Package: com.banking.transactionlog.model.transactionrecord
 Layer: Domain / Value Object
 Attributes: accountId: UUID; productType: String
 ```
 
 ```text
 Class (record): TransactionFilter
-Package: com.banking.transactionlog.domain.model
+Package: com.banking.transactionlog.model.transactionrecord
 Layer: Domain / Value Object
 Attributes: dateFrom: Optional<LocalDate>; dateTo: Optional<LocalDate>; type: Optional<TransactionType>;
             minAmount: Optional<BigDecimal>; maxAmount: Optional<BigDecimal>
@@ -178,9 +192,11 @@ Methods:
 
 ```text
 Class: TransactionClassifier
-Package: com.banking.transactionlog.domain.service
+Package: com.banking.transactionlog.model.transactionrecord
 Layer: Domain / Domain Service
 Responsibility: Encapsulates the debit/credit display and sign rules so use cases stay declarative.
+  Note: the scaffold has no dedicated "generate domain service" task — this is simply an ordinary
+  class you write by hand inside the model module, same as any other domain class with zero I/O.
 Methods:
 + signedAmount(TransactionRecord record): BigDecimal
 ```
@@ -189,26 +205,18 @@ Methods:
 Class: TransactionNotFoundException extends RuntimeException
 Class: DuplicateTransactionException extends RuntimeException
 Class: InvalidTransactionFilterException extends RuntimeException
-Package: com.banking.transactionlog.domain.exception
+Package: com.banking.transactionlog.model.transactionrecord.exceptions
 ```
 
-### Application layer — `domain/usecase` (ports live alongside use cases per the Bancolombia scaffold convention)
-
 ```text
-Interface: RecordTransactionInputPort
-Package: com.banking.transactionlog.domain.usecase.port.in
-Method: + record(TransactionRecord transaction): TransactionRecord
-
-Interface: FindAccountTransactionsInputPort
-Package: com.banking.transactionlog.domain.usecase.port.in
-Method: + find(AccountReference accountId, TransactionFilter filter, int page, int size): Page<TransactionRecord>
-
-Interface: FindTransactionByIdInputPort
-Package: com.banking.transactionlog.domain.usecase.port.in
-Method: + findById(TransactionId id): TransactionRecord
-
-Interface: TransactionRepository   (output port)
-Package: com.banking.transactionlog.domain.usecase.port.out
+Interface: TransactionRecordRepository   (Gateway)
+Package: com.banking.transactionlog.model.transactionrecord.gateways
+Responsibility: The output port a use case depends on to reach persistence — generated together
+                with the entity by `./gradlew gm --name=TransactionRecord`, which creates
+                TransactionRecord.java and gateways/TransactionRecordRepository.java in one step
+                (the gateway name is derived as <ModelName>Repository; the task has no flag to
+                choose a different name). That is why it lives here, in model, next to the entity
+                it serves, rather than in the usecase module alongside its callers.
 Methods:
 + save(TransactionRecord transaction): TransactionRecord
 + findById(TransactionId id): Optional<TransactionRecord>
@@ -216,26 +224,64 @@ Methods:
 + findByAccount(AccountReference accountId, TransactionFilter filter, int page, int size): Page<TransactionRecord>
 ```
 
+### Application layer — Gradle module `domain/usecase`, one sub-package per use case, package root `com.banking.transactionlog.usecase`
+
 ```text
-Class: RecordTransactionUseCase implements RecordTransactionInputPort
-Package: com.banking.transactionlog.domain.usecase
-Dependencies: TransactionRepository
-Constructor: RecordTransactionUseCase(TransactionRepository repository)
+Class: RecordTransactionUseCase
+Package: com.banking.transactionlog.usecase.recordtransaction
+Dependencies: TransactionRecordRepository
+Constructor: RecordTransactionUseCase(TransactionRecordRepository repository)
 Method: + record(TransactionRecord transaction): TransactionRecord
   Logic: reject if repository.existsByExternalReference(...) -> DuplicateTransactionException; else save.
 
-Class: FindAccountTransactionsUseCase implements FindAccountTransactionsInputPort
-Package: com.banking.transactionlog.domain.usecase
-Dependencies: TransactionRepository
+Class: FindAccountTransactionsUseCase
+Package: com.banking.transactionlog.usecase.findaccounttransactions
+Dependencies: TransactionRecordRepository
 Method: + find(...): Page<TransactionRecord>
   Logic: filter.validate(); delegate to repository.findByAccount(...).
 
-Class: FindTransactionByIdUseCase implements FindTransactionByIdInputPort
-Package: com.banking.transactionlog.domain.usecase
-Dependencies: TransactionRepository
+Class: FindTransactionByIdUseCase
+Package: com.banking.transactionlog.usecase.findtransactionbyid
+Dependencies: TransactionRecordRepository
 Method: + findById(TransactionId id): TransactionRecord
   Logic: repository.findById(id).orElseThrow(TransactionNotFoundException::new).
 ```
+
+No `implements SomeInputPort` on any of these three — the scaffold's `guc` task generates a concrete class only, so `TransactionController` below depends on the three `UseCase` classes directly (see §3's scaffold terminology note for why this spec no longer shows a separate input-port layer).
+
+**How to create `FindTransactionByIdUseCase` (and why its signature differs from the gateway's).** The use case's `findById` and the gateway's `findById` are two different methods on two different types, and they are *meant* to have different return types: the gateway reports "nothing found" as an empty `Optional` (a persistence-level fact), and the use case turns that into a business outcome by throwing `TransactionNotFoundException` (a domain-level decision). The gateway never defines the use case's method — the use case is the one that *calls* the gateway. Steps:
+
+```bash
+./gradlew gm  --name=TransactionRecord        # entity + gateways/TransactionRecordRepository (once)
+./gradlew guc --name=FindTransactionById      # usecase/findtransactionbyid/FindTransactionByIdUseCase
+```
+
+The generator creates an empty class; you write the constructor and the method:
+
+```java
+package com.banking.transactionlog.usecase.findtransactionbyid;
+
+import com.banking.transactionlog.model.transactionrecord.TransactionId;
+import com.banking.transactionlog.model.transactionrecord.TransactionRecord;
+import com.banking.transactionlog.model.transactionrecord.exceptions.TransactionNotFoundException;
+import com.banking.transactionlog.model.transactionrecord.gateways.TransactionRecordRepository;
+
+public class FindTransactionByIdUseCase {
+
+    private final TransactionRecordRepository repository;
+
+    public FindTransactionByIdUseCase(TransactionRecordRepository repository) {
+        this.repository = repository;
+    }
+
+    public TransactionRecord findById(TransactionId id) {
+        return repository.findById(id)                          // Optional<TransactionRecord> from the gateway
+                .orElseThrow(TransactionNotFoundException::new); // absent -> business exception (TXN-404-001)
+    }
+}
+```
+
+No `@Service`, no Spring import — the class stays framework-free. In the scaffold's generated `application/config`, a `UseCasesConfig` registers every class whose name ends in `UseCase` as a bean, which is how the controller gets it injected without the domain ever seeing an annotation. (If you generate with `--lombok=true`, the explicit constructor becomes `@RequiredArgsConstructor`.)
 
 DTOs and mappers live in the entry-point module, not the domain, per dependency-inversion rules:
 
@@ -271,7 +317,7 @@ Methods: + toResponse(TransactionRecord record): TransactionResponse
 Class: TransactionController
 Package: com.banking.transactionlog.infrastructure.entrypoint.rest
 Layer: Infrastructure / Entry Point
-Dependencies: RecordTransactionInputPort, FindAccountTransactionsInputPort, FindTransactionByIdInputPort,
+Dependencies: RecordTransactionUseCase, FindAccountTransactionsUseCase, FindTransactionByIdUseCase,
               TransactionRequestMapper, TransactionResponseMapper
 Endpoints:
 + POST   /v1/accounts/{accountId}/transactions        -> record(...)
@@ -292,7 +338,7 @@ Package: com.banking.transactionlog.infrastructure.drivenadapter.jpa
 Methods: + existsByExternalReference(String ref): boolean
          + findByAccountIdAndPostedAtBetween(...): Page<TransactionJpaEntity>   [Spring Data derived + @Query for filters]
 
-Class: TransactionRepositoryAdapter implements TransactionRepository
+Class: TransactionRecordRepositoryAdapter implements TransactionRecordRepository
 Package: com.banking.transactionlog.infrastructure.drivenadapter.jpa
 Dependencies: SpringDataTransactionJpaRepository, TransactionPersistenceMapper
 
@@ -339,6 +385,11 @@ Responsibility: springdoc bean exposing OAuth2 security scheme metadata for the 
 
 ```mermaid
 classDiagram
+    class TransactionId {
+      <<value object>>
+      +UUID value
+      +generate() TransactionId
+    }
     class TransactionRecord {
       -TransactionId id
       -AccountReference accountId
@@ -371,8 +422,8 @@ classDiagram
       <<domain service>>
       +signedAmount(TransactionRecord) BigDecimal
     }
-    class TransactionRepository {
-      <<interface>>
+    class TransactionRecordRepository {
+      <<gateway>>
       +save(TransactionRecord) TransactionRecord
       +findById(TransactionId) Optional
       +findByAccount(AccountReference, TransactionFilter, int, int) Page
@@ -388,19 +439,20 @@ classDiagram
       +find(...) ResponseEntity
       +findById(...) ResponseEntity
     }
-    class TransactionRepositoryAdapter {
+    class TransactionRecordRepositoryAdapter {
       +save(TransactionRecord) TransactionRecord
       +findById(TransactionId) Optional
       +findByAccount(...) Page
     }
+    TransactionRecord "1" --> "1" TransactionId : id
     TransactionRecord "1" --> "1" Money : amount
     TransactionRecord "1" --> "1" AccountReference : accountId
     TransactionController ..> RecordTransactionUseCase : uses
     TransactionController ..> FindAccountTransactionsUseCase : uses
-    RecordTransactionUseCase ..> TransactionRepository : uses
-    FindAccountTransactionsUseCase ..> TransactionRepository : uses
+    RecordTransactionUseCase ..> TransactionRecordRepository : uses
+    FindAccountTransactionsUseCase ..> TransactionRecordRepository : uses
     RecordTransactionUseCase ..> TransactionClassifier : uses
-    TransactionRepositoryAdapter ..|> TransactionRepository : implements
+    TransactionRecordRepositoryAdapter ..|> TransactionRecordRepository : implements
 ```
 
 ## 6. API and OpenAPI Contract
@@ -418,7 +470,7 @@ sequenceDiagram
     participant C as Channel App
     participant Ctrl as TransactionController
     participant UC as FindAccountTransactionsUseCase
-    participant Repo as TransactionRepositoryAdapter
+    participant Repo as TransactionRecordRepositoryAdapter
     participant DB as PostgreSQL
     C->>Ctrl: GET /v1/accounts/{id}/transactions?filters
     Ctrl->>UC: find(accountId, filter, page, size)
@@ -837,13 +889,21 @@ transaction-log-service/
 ├── build.gradle
 ├── settings.gradle
 ├── domain/
-│   ├── model/
-│   └── usecase/
+│   ├── model/                          (Gradle subproject — zero dependencies, not even Spring)
+│   │   └── .../model/transactionrecord/
+│   │       ├── TransactionRecord.java, TransactionId.java, Money.java, ...
+│   │       ├── exceptions/
+│   │       └── gateways/TransactionRecordRepository.java
+│   └── usecase/                        (Gradle subproject — depends on model ONLY)
+│       └── .../usecase/
+│           ├── recordtransaction/RecordTransactionUseCase.java
+│           ├── findaccounttransactions/FindAccountTransactionsUseCase.java
+│           └── findtransactionbyid/FindTransactionByIdUseCase.java
 ├── infrastructure/
 │   ├── driven-adapters/
-│   │   └── jpa-postgresql/
+│   │   └── jpa-postgresql/             (implements TransactionRecordRepository)
 │   └── entry-points/
-│       └── api-rest/
+│       └── api-rest/                   (TransactionController, calls the UseCase classes directly)
 ├── application/
 │   └── config/
 ├── deployment/
@@ -851,7 +911,7 @@ transaction-log-service/
 └── openapi/
 ```
 
-`domain` and `infrastructure/*` and `application` are independent Gradle subprojects declared in `settings.gradle`; `domain` has zero Spring dependencies in its `build.gradle` — this is enforced structurally, not just by convention.
+`domain/model` and `domain/usecase` are two **independent** Gradle subprojects declared in `settings.gradle` — not one combined "domain" subproject — which is what lets `validateStructure` enforce the dependency rule precisely: `model` depends on nothing, `usecase` depends on `model` only, and every `infrastructure/*` subproject may depend on both but never on `application`. `model`'s `build.gradle` has zero Spring dependencies — enforced structurally by the module boundary itself, not just by convention or code review.
 
 ## 11. Interview Preparation and Portfolio Evaluation
 
@@ -859,7 +919,7 @@ transaction-log-service/
 
 **Spring.** What does `@RestControllerAdvice` do that `@ExceptionHandler` on the controller itself doesn't? Why constructor injection over field injection? Walk through what `spring-boot-starter-oauth2-resource-server` autoconfigures.
 
-**Clean Architecture.** Where does `TransactionRepository` (the interface) live, and where does its implementation live — and why does that direction matter? What would break if `TransactionRecordUseCase` imported `jakarta.persistence.Entity`?
+**Clean Architecture.** `TransactionRecordRepository` is a **Gateway**, not a "service" — where exactly does it live (which Gradle module, which package), where does its implementation live, and why does that direction matter? What would break if `TransactionRecord` imported `jakarta.persistence.Entity`? And since this one project has all four: a Gateway (`TransactionRecordRepository`), a Use Case (`RecordTransactionUseCase`), a Domain Service (`TransactionClassifier`), and ordinary Spring beans that are plain `@Service`/`@Component` in infrastructure — explain, without hand-waving, what distinguishes each of the four.
 
 **BIAN.** Why is this project scoped to only a slice of the Current Account Service Domain rather than the whole thing? What's the difference between a BIAN Service Domain and a microservice?
 
